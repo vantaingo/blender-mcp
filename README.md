@@ -14,22 +14,6 @@ Give feedback, get inspired, and build on top of the MCP: [Discord](https://disc
 
 ### Supporters
 
-<div align="center" markdown="1">
-   <sup>Special thanks to:</sup>
-   <br>
-   <br>
-   <a href="https://www.warp.dev/blender-mcp">
-      <img alt="Warp sponsorship" width="400" src="https://github.com/user-attachments/assets/c21102f7-bab9-4344-a731-0cf6b341cab2">
-   </a>
-
-### [Warp, the intelligent terminal for developers](https://www.warp.dev/blender-mcp)
-[Available for MacOS, Linux, & Windows](https://www.warp.dev/blender-mcp)<br>
-
-</div>
-<hr>
-
-**Other supporters:**
-
 [CodeRabbit](https://www.coderabbit.ai/)
 
 [Satish Goda](https://github.com/satishgoda)
