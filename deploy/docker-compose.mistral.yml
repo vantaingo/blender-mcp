@@ -1,0 +1,28 @@
+services:
+  blender-mcp:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    container_name: blender-mcp
+    environment:
+      BLENDER_HOST: 192.168.1.50
+      BLENDER_PORT: 9876
+    command:
+      [
+        "bash",
+        "-lc",
+        "blender-mcp --transport http --host 0.0.0.0 --port 3000"
+      ]
+    networks:
+      - mcp_net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:3000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+networks:
+  mcp_net:
+    driver: bridge
