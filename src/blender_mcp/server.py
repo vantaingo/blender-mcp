@@ -7,11 +7,12 @@ import logging
 import tempfile
 from dataclasses import dataclass
 from contextlib import asynccontextmanager
-from typing import AsyncIterator, Dict, Any, List
+from typing import AsyncIterator, Dict, Any, List, Callable
 import os
 from pathlib import Path
 import base64
 from urllib.parse import urlparse
+import hashlib
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, 
@@ -194,11 +195,168 @@ async def server_lifespan(server: FastMCP) -> AsyncIterator[Dict[str, Any]]:
             _blender_connection = None
         logger.info("BlenderMCP server shut down")
 
+# MCP metadata so remote clients (e.g. Mistral) can present consistent context
+MCP_SERVER_NAME = os.getenv("MCP_SERVER_NAME", "BlenderMCP")
+MCP_SERVER_DESCRIPTION = os.getenv(
+    "MCP_SERVER_DESCRIPTION",
+    "Model Context Protocol bridge exposing Blender tools."
+)
+MCP_SERVER_VERSION = os.getenv("MCP_SERVER_VERSION", "1.2.0")
+
 # Create the MCP server with lifespan support
 mcp = FastMCP(
-    "BlenderMCP",
-    lifespan=server_lifespan
+    MCP_SERVER_NAME,
+    lifespan=server_lifespan,
 )
+
+# HTTP transport customisation for remote clients (Mistral, n8n, etc.)
+_HTTP_APP_CONFIGURED = False
+
+def _configure_http_app() -> None:
+    """
+    Apply HTTP specific features recommended for remote MCP usage:
+    - Well-known manifest for discovery
+    - Optional bearer/basic auth
+    - Optional CORS controls
+    - Health endpoint
+    """
+    global _HTTP_APP_CONFIGURED
+
+    if _HTTP_APP_CONFIGURED:
+        return
+
+    if not hasattr(mcp, "http_app"):
+        logger.debug("FastMCP HTTP app unavailable; skipping HTTP configuration.")
+        return
+
+    try:
+        from fastapi import Depends, HTTPException, Request
+        from fastapi.responses import JSONResponse, Response
+        from fastapi.middleware.cors import CORSMiddleware
+        from starlette.middleware.base import BaseHTTPMiddleware
+        from starlette.status import HTTP_401_UNAUTHORIZED
+    except Exception as exc:  # pragma: no cover - defensive import guard
+        logger.warning("HTTP dependencies missing; cannot expose modern MCP endpoints (%s)", exc)
+        return
+
+    app = mcp.http_app  # type: ignore[attr-defined]
+
+    allowed_origins_env = os.getenv("MCP_ALLOWED_ORIGINS", "")
+    allowed_origins = [origin.strip() for origin in allowed_origins_env.split(",") if origin.strip()]
+
+    if allowed_origins:
+        logger.info("Enabling CORS with allowed origins: %s", ", ".join(allowed_origins))
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=allowed_origins,
+            allow_credentials=True,
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
+
+    basic_user = os.getenv("MCP_BASIC_AUTH_USER")
+    basic_password = os.getenv("MCP_BASIC_AUTH_PASSWORD")
+    bearer_token = os.getenv("MCP_BEARER_TOKEN")
+
+    if basic_user and not basic_password:
+        logger.warning("MCP_BASIC_AUTH_USER is set but MCP_BASIC_AUTH_PASSWORD is missing.")
+    if bearer_token:
+        bearer_hash = hashlib.sha256(bearer_token.encode("utf-8")).hexdigest()
+        logger.info("Bearer token authentication enabled (sha256=%s)", bearer_hash[:10])
+
+    def _unauthorized_response(auth_type: str) -> Response:
+        headers = {}
+        if auth_type == "basic":
+            headers["WWW-Authenticate"] = 'Basic realm="BlenderMCP"'
+        return Response(status_code=HTTP_401_UNAUTHORIZED, headers=headers)
+
+    def _verify_basic(header: str) -> bool:
+        encoded = header.split(" ", 1)[1] if " " in header else ""
+        try:
+            decoded = base64.b64decode(encoded).decode("utf-8")
+        except Exception:
+            return False
+        username, _, password = decoded.partition(":")
+        return username == basic_user and password == basic_password
+
+    def _verify_bearer(header: str) -> bool:
+        token = header.split(" ", 1)[1] if " " in header else ""
+        return token == bearer_token
+
+    def _should_skip_auth(request: Request) -> bool:
+        # Allow unauthenticated access to health and manifest for discovery.
+        return request.url.path in ("/health", "/.well-known/mcp.json")
+
+    class AuthMiddleware(BaseHTTPMiddleware):
+        async def dispatch(self, request: Request, call_next: Callable):
+            if _should_skip_auth(request):
+                return await call_next(request)
+
+            auth_header = request.headers.get("Authorization")
+            if basic_user and basic_password:
+                if not auth_header or not auth_header.lower().startswith("basic "):
+                    return _unauthorized_response("basic")
+                if not _verify_basic(auth_header):
+                    return _unauthorized_response("basic")
+            elif bearer_token:
+                if not auth_header or not auth_header.lower().startswith("bearer "):
+                    return _unauthorized_response("bearer")
+                if not _verify_bearer(auth_header):
+                    return _unauthorized_response("bearer")
+            return await call_next(request)
+
+    if (basic_user and basic_password) or bearer_token:
+        logger.info("Registering HTTP authentication middleware for MCP server")
+        app.add_middleware(AuthMiddleware)
+
+    def _build_manifest(request: Request) -> Dict[str, Any]:
+        base_url = os.getenv("MCP_PUBLIC_URL")
+        if not base_url:
+            # Strip path from current URL to derive base (ensure trailing slash)
+            url = str(request.base_url).rstrip("/")
+            base_url = url
+        transport_url = base_url
+        manifest: Dict[str, Any] = {
+            "kind": "mcp",
+            "name": MCP_SERVER_NAME,
+            "version": MCP_SERVER_VERSION,
+            "description": MCP_SERVER_DESCRIPTION,
+            "transport": {
+                "type": "http",
+                "url": transport_url,
+            },
+            "capabilities": {
+                "resources": True,
+                "tools": True,
+                "prompts": False,
+                "summaries": False,
+                "tokens": False,
+            },
+        }
+        if (basic_user and basic_password) or bearer_token:
+            manifest["authentication"] = {
+                "type": "basic" if basic_user and basic_password else "bearer",
+                "documentation_url": os.getenv("MCP_AUTH_DOCUMENTATION_URL"),
+            }
+        return manifest
+
+    @app.get("/.well-known/mcp.json")
+    async def mcp_manifest(request: Request) -> JSONResponse:
+        """
+        Discovery endpoint recommended by Mistral to register remote MCP servers.
+        """
+        manifest = _build_manifest(request)
+        return JSONResponse(manifest)
+
+    @app.get("/health")
+    async def healthcheck() -> Dict[str, str]:
+        return {"status": "ok"}
+
+    _HTTP_APP_CONFIGURED = True
+    logger.info("HTTP transport configured for BlenderMCP.")
+
+
+_configure_http_app()
 
 # Resource endpoints
 

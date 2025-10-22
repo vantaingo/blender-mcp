@@ -47,6 +47,12 @@ services:
       # Adresse du Mac sur le LAN
       BLENDER_HOST: 192.168.1.50
       BLENDER_PORT: 9876
+      # (Optionnel) URL publique pour le manifeste MCP
+      MCP_PUBLIC_URL: https://mcp.mondomaine.tld
+      # (Optionnel) Protection HTTP
+      MCP_BASIC_AUTH_USER: blender
+      MCP_BASIC_AUTH_PASSWORD: change-me
+      # Pour un token Bearer, utilisez MCP_BEARER_TOKEN à la place
     command:
       [
         "bash",
@@ -110,7 +116,7 @@ Le serveur MCP écoutera sur `http://0.0.0.0:3000`. Le reverse proxy Synology te
 ## 5. Sécurisation applicative
 
 1. **Authentification via reverse proxy** : utilisez Basic Auth ou un fournisseur OAuth2 sur Synology pour protéger l’URL publique.
-2. **Limiter les origines** : appliquez des règles IP ou des ACL directement dans le reverse proxy.
+2. **Limiter les origines** : appliquez des règles IP ou des ACL directement dans le reverse proxy ou via `MCP_ALLOWED_ORIGINS`.
 3. **Observabilité** : activez la journalisation (niveau INFO) et expédiez les logs vers une stack (Grafana Loki, Synology Log Center).
 4. **Rotation des mots de passe** : changez régulièrement les identifiants Basic Auth et stockez-les dans un coffre (Synology Password Manager, Vaultwarden).
 
@@ -149,10 +155,11 @@ Lors de l’appel à l’API Mistral, ajoutez la section `mcp_servers` dans la c
 
 ## 8. Tests et exploitation
 
-1. Vérifiez la santé via `curl https://mcp.mondomaine.tld/health` (ou en ajoutant `-u user:password` si Basic Auth).
-2. Sur le NAS, surveillez `docker logs blender-mcp`.
-3. Dans Blender, assurez-vous que l’addon indique « Connected to server ».
-4. Script de test rapide (depuis le conteneur) :
+1. Vérifiez la santé via `curl https://mcp.mondomaine.tld/health` (ou ajoutez `-u user:password` / `-H "Authorization: Bearer …"` selon l’auth choisie).
+2. Contrôlez que la découverte fonctionne : `curl https://mcp.mondomaine.tld/.well-known/mcp.json`.
+3. Sur le NAS, surveillez `docker logs blender-mcp`.
+4. Dans Blender, assurez-vous que l’addon indique « Connected to server ».
+5. Script de test rapide (depuis le conteneur) :
 
 ```bash
 curl -X POST \
